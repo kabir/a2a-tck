@@ -688,21 +688,21 @@ class GRPCClient(BaseTransportClient):
             # Make real gRPC streaming call to live SUT
             self._load_static_stubs()
             pb = self._pb
-            
-            # Build TaskSubscriptionRequest
-            request = pb.TaskSubscriptionRequest(name=f"tasks/{task_id}")
-            
+
+            # Build SubscribeToTaskRequest
+            request = pb.SubscribeToTaskRequest(name=f"tasks/{task_id}")
+
             # Create appropriate channel based on TLS setting
             if self.use_tls:
                 credentials = grpc.ssl_channel_credentials()
                 channel = grpc.aio.secure_channel(self.grpc_target, credentials)
             else:
                 channel = grpc.aio.insecure_channel(self.grpc_target)
-                
+
             async with channel:
                 # Use the generated protobuf stub for task subscription
                 stub = self._pb_grpc.A2AServiceStub(channel)
-                stream = stub.TaskSubscription(request, timeout=self.timeout)
+                stream = stub.SubscribeToTask(request, timeout=self.timeout)
                 
                 async for response in stream:
                     # Convert protobuf response to JSON format
@@ -739,7 +739,7 @@ class GRPCClient(BaseTransportClient):
             logger.debug(f"Completed gRPC subscription for task: {task_id}")
 
         except grpc.RpcError as e:
-            error_msg = f"gRPC TaskSubscription failed: {e.code().name} - {e.details()}"
+            error_msg = f"gRPC SubscribeToTask failed: {e.code().name} - {e.details()}"
             logger.error(error_msg)
             # Map gRPC status to A2A error code per specification
             a2a_error = self._map_grpc_error_to_a2a(e)
@@ -888,11 +888,11 @@ class GRPCClient(BaseTransportClient):
             )
 
             # Build request
-            req = pb.CreateTaskPushNotificationConfigRequest(
+            req = pb.SetTaskPushNotificationConfigRequest(
                 parent=f"tasks/{task_id}", config_id=config.get("id", "default"), config=task_config
             )
 
-            resp = self.stub.CreateTaskPushNotificationConfig(req, timeout=self.timeout)
+            resp = self.stub.SetTaskPushNotificationConfig(req, timeout=self.timeout)
 
             # Convert response to JSON format that matches expected test format
             created_config = {
@@ -910,7 +910,7 @@ class GRPCClient(BaseTransportClient):
             return created_config
 
         except grpc.RpcError as e:
-            error_msg = f"gRPC CreateTaskPushNotificationConfig failed: {e.code().name} - {e.details()}"
+            error_msg = f"gRPC SetTaskPushNotificationConfig failed: {e.code().name} - {e.details()}"
             logger.error(error_msg)
             # Map gRPC status to A2A error code per specification
             a2a_error = self._map_grpc_error_to_a2a(e)
@@ -1074,6 +1074,8 @@ class GRPCClient(BaseTransportClient):
         """
         Convert AgentCard protobuf response to JSON format.
 
+        Uses v0.3.0+ supportedInterfaces with protocolBinding field.
+
         Args:
             resp: Protobuf AgentCard response object
 
@@ -1081,21 +1083,16 @@ class GRPCClient(BaseTransportClient):
             Dict containing JSON representation of the AgentCard
         """
         agent_card = {
-            "protocolVersion": resp.protocol_version,
+            "protocolVersion": resp.protocol_version or "1.0",
             "name": resp.name,
             "description": resp.description,
-            "url": resp.url,
             "version": resp.version,
-            "preferredTransport": resp.preferred_transport or "GRPC",
             "capabilities": {
                 "streaming": resp.capabilities.streaming if resp.capabilities else False,
                 "pushNotifications": resp.capabilities.push_notifications if resp.capabilities else False,
             },
             "defaultInputModes": list(resp.default_input_modes),
             "defaultOutputModes": list(resp.default_output_modes),
-            "additionalInterfaces": [
-                {"url": iface.url, "transport": iface.transport} for iface in resp.additional_interfaces
-            ],
             "skills": [
                 {
                     "id": skill.id,
@@ -1105,6 +1102,10 @@ class GRPCClient(BaseTransportClient):
                     "examples": list(skill.examples),
                 }
                 for skill in resp.skills
+            ],
+            "supportedInterfaces": [
+                {"url": iface.url, "protocolBinding": iface.protocol_binding}
+                for iface in resp.supported_interfaces
             ],
         }
 

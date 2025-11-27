@@ -69,7 +69,7 @@ def test_mandatory_fields_present(fetched_agent_card):
 
     Failure Impact: Implementation is not A2A compliant
     """
-    # Based on the A2A JSON schema, these fields are actually required
+    # Based on the A2A v1.0.0 specification, these fields are required
     mandatory_fields = [
         "capabilities",
         "defaultInputModes",
@@ -77,7 +77,6 @@ def test_mandatory_fields_present(fetched_agent_card):
         "description",
         "name",
         "skills",
-        "url",
         "version",
     ]
 
@@ -108,19 +107,24 @@ def test_mandatory_field_types(fetched_agent_card):
 
     Failure Impact: Implementation is not A2A compliant
     """
-    # Check types of required fields according to A2A specification
+    # Check types of required fields according to A2A v1.0.0 specification
     assert isinstance(fetched_agent_card.get("name"), str), "name must be a string"
     assert isinstance(fetched_agent_card.get("description"), str), "description must be a string"
     assert isinstance(fetched_agent_card.get("version"), str), "version must be a string"
-    assert isinstance(fetched_agent_card.get("url"), str), "url must be a string"
     assert isinstance(fetched_agent_card.get("capabilities"), dict), "capabilities must be an object"
     assert isinstance(fetched_agent_card.get("defaultInputModes"), list), "defaultInputModes must be an array"
     assert isinstance(fetched_agent_card.get("defaultOutputModes"), list), "defaultOutputModes must be an array"
     assert isinstance(fetched_agent_card.get("skills"), list), "skills must be an array"
 
-    # Simple regex to check for a valid URL format
-    url = fetched_agent_card["url"]
-    url_pattern = r"^https?://[^\s/$.?#].[^\s]*$"
-    assert re.match(url_pattern, url), f"url is not a valid URL: {url}"
+    # Check optional fields if present (v1.0.0 deprecated fields)
+    if "url" in fetched_agent_card:
+        url = fetched_agent_card["url"]
+        assert isinstance(url, str), "url (if present) must be a string"
+        # Simple regex to check for a valid URL format
+        url_pattern = r"^https?://[^\s/$.?#].[^\s]*$"
+        assert re.match(url_pattern, url), f"url is not a valid URL: {url}"
+
+    if "supportedInterfaces" in fetched_agent_card:
+        assert isinstance(fetched_agent_card.get("supportedInterfaces"), list), "supportedInterfaces (if present) must be an array"
 
     # Note: protocolVersion and id are NOT in A2A specification
