@@ -261,7 +261,21 @@ def sut_client(transport_manager, request):
         if client is None:
             pytest.fail("No transport client available. Check SUT transport configuration.")
 
-        return client
+        yield client
+
+        # Cleanup: Close gRPC channels to prevent connection reuse across tests
+        # This ensures fresh connections for each test, preventing state accumulation
+        if hasattr(client, 'close'):
+            try:
+                client.close()
+                logger.debug(f"Closed {client.transport_type} client after test")
+            except Exception as e:
+                logger.warning(f"Error closing client: {e}")
+
+        # Remove from cache to force fresh client in next test
+        from tck.transport.base_client import TransportType
+        if hasattr(client, 'transport_type') and client.transport_type in transport_manager._client_cache:
+            del transport_manager._client_cache[client.transport_type]
 
     except Exception as e:
         pytest.fail(f"Failed to create transport client: {e}")

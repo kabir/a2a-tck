@@ -511,6 +511,8 @@ class GRPCClient(BaseTransportClient):
         Raises:
             TransportError: If gRPC streaming call fails
         """
+        import asyncio
+
         try:
             msg_id = message.get("messageId") or message.get("message_id") or "unknown"
             ctx_id = message.get("contextId") or message.get("context_id") or "default-context"
@@ -519,50 +521,60 @@ class GRPCClient(BaseTransportClient):
             # Build protobuf request
             request = self._json_to_send_message_request(message, blocking=False)
 
+            # Small delay to allow previous connections to fully close
+            # Workaround for SUT issue where rapid streaming requests can cause
+            # "Request stream 1 is not correct for server connection" errors
+            await asyncio.sleep(0.1)
+
             # Make real gRPC streaming call to live SUT
             if self.use_tls:
                 credentials = grpc.ssl_channel_credentials()
                 channel = grpc.aio.secure_channel(self.grpc_target, credentials)
             else:
                 channel = grpc.aio.insecure_channel(self.grpc_target)
-                
+
             async with channel:
                 # Use the generated protobuf stub for streaming
                 stub = self._pb_grpc.A2AServiceStub(channel)
                 stream = stub.SendStreamingMessage(request, timeout=self.timeout)
-                
-                async for response in stream:
-                    # Convert protobuf response to JSON format
-                    if response.WhichOneof("payload") == "task":
-                        t = response.task
-                        yield {
-                            "task": {
-                                "id": t.id,
-                                "contextId": t.context_id,
-                                "status": {"state": self._map_state_enum_to_json(t.status.state)},
-                                "kind": "task",
+
+                try:
+                    async for response in stream:
+                        # Convert protobuf response to JSON format
+                        if response.WhichOneof("payload") == "task":
+                            t = response.task
+                            yield {
+                                "task": {
+                                    "id": t.id,
+                                    "contextId": t.context_id,
+                                    "status": {"state": self._map_state_enum_to_json(t.status.state)},
+                                    "kind": "task",
+                                }
                             }
-                        }
-                    elif response.WhichOneof("payload") == "status_update":
-                        su = response.status_update
-                        yield {
-                            "status_update": {
+                        elif response.WhichOneof("payload") == "status_update":
+                            su = response.status_update
+                            yield {
+                                "kind": "status-update",
                                 "taskId": su.task_id,
                                 "contextId": su.context_id,
                                 "status": {"state": self._map_state_enum_to_json(su.status.state)},
                                 "final": getattr(su, "final", False),
                             }
-                        }
-                    elif response.WhichOneof("payload") == "msg":
-                        m = response.msg
-                        yield {
-                            "message": {
-                                "kind": "message",
-                                "role": "agent",
-                                "messageId": m.message_id,
-                                "parts": ([{"kind": "text", "text": m.content[0].text}] if m.content else []),
+                        elif response.WhichOneof("payload") == "msg":
+                            m = response.msg
+                            yield {
+                                "message": {
+                                    "kind": "message",
+                                    "role": "agent",
+                                    "messageId": m.message_id,
+                                    "parts": ([{"kind": "text", "text": m.content[0].text}] if m.content else []),
+                                }
                             }
-                        }
+                except asyncio.CancelledError:
+                    # Explicitly cancel the gRPC stream to send RST_STREAM to server
+                    stream.cancel()
+                    logger.debug(f"Cancelled gRPC streaming for message {message.get('message_id')}")
+                    raise
 
             logger.debug(f"Completed gRPC streaming for message {message.get('message_id')}")
 
@@ -746,38 +758,43 @@ class GRPCClient(BaseTransportClient):
                 # Use the generated protobuf stub for task subscription
                 stub = self._pb_grpc.A2AServiceStub(channel)
                 stream = stub.TaskSubscription(request, timeout=self.timeout)
-                
-                async for response in stream:
-                    # Convert protobuf response to JSON format
-                    if response.WhichOneof("payload") == "task":
-                        t = response.task
-                        yield {
-                            "task": {
-                                "id": t.id,
-                                "contextId": t.context_id,
-                                "status": {"state": self._map_state_enum_to_json(t.status.state)},
-                                "kind": "task",
+
+                try:
+                    async for response in stream:
+                        # Convert protobuf response to JSON format
+                        if response.WhichOneof("payload") == "task":
+                            t = response.task
+                            yield {
+                                "task": {
+                                    "id": t.id,
+                                    "contextId": t.context_id,
+                                    "status": {"state": self._map_state_enum_to_json(t.status.state)},
+                                    "kind": "task",
+                                }
                             }
-                        }
-                    elif response.WhichOneof("payload") == "status_update":
-                        su = response.status_update
-                        yield {
-                            "status_update": {
+                        elif response.WhichOneof("payload") == "status_update":
+                            su = response.status_update
+                            yield {
+                                "kind": "status-update",
                                 "taskId": su.task_id,
                                 "contextId": su.context_id,
                                 "status": {"state": self._map_state_enum_to_json(su.status.state)},
                                 "final": getattr(su, "final", False),
                             }
-                        }
-                    elif response.WhichOneof("payload") == "error":
-                        # Handle error responses from the server
-                        error = response.error
-                        yield {
-                            "error": {
-                                "code": error.code,
-                                "message": error.message,
+                        elif response.WhichOneof("payload") == "error":
+                            # Handle error responses from the server
+                            error = response.error
+                            yield {
+                                "error": {
+                                    "code": error.code,
+                                    "message": error.message,
+                                }
                             }
-                        }
+                except asyncio.CancelledError:
+                    # Explicitly cancel the gRPC stream to send RST_STREAM to server
+                    stream.cancel()
+                    logger.debug(f"Cancelled gRPC subscription for task: {task_id}")
+                    raise
 
             logger.debug(f"Completed gRPC subscription for task: {task_id}")
 

@@ -81,6 +81,7 @@ async def test_message_stream_basic(sut_client, agent_card_data):
         }
     }
 
+    stream = None
     try:
         # Use transport-agnostic streaming message sending
         stream = transport_send_streaming_message(sut_client, message_params)
@@ -114,6 +115,16 @@ async def test_message_stream_basic(sut_client, agent_card_data):
 
         except asyncio.TimeoutError:
             logger.warning("Timeout while processing streaming events")
+        finally:
+            # Explicitly close generator to send RST_STREAM to server
+            if stream is not None and hasattr(stream, 'aclose'):
+                try:
+                    await stream.aclose()
+                except Exception as e:
+                    logger.debug(f"Error closing stream: {e}")
+            # Delay to allow SUT to process stream closure
+            # Longer delay works around SUT bug where rapid sequential requests fail
+            await asyncio.sleep(1.0)
 
         # Validate the collected events
         assert len(events) > 0, "Streaming capability declared but no events received from stream"
@@ -172,10 +183,11 @@ async def test_message_stream_invalid_params(sut_client, agent_card_data):
     # Test with invalid params structure (missing required fields)
     invalid_message_params = {"invalid": "params"}  # Missing required message structure
 
+    stream = None
     try:
         # This should fail at the transport level or return an error stream
         stream = transport_send_streaming_message(sut_client, invalid_message_params)
-        
+
         # If we get a stream, check if it returns error events
         events = []
         try:
@@ -187,7 +199,17 @@ async def test_message_stream_invalid_params(sut_client, agent_card_data):
         except Exception:
             # Expected - invalid params should cause an error
             pass
-        
+        finally:
+            # Explicitly close generator to send RST_STREAM to server
+            if stream is not None and hasattr(stream, 'aclose'):
+                try:
+                    await stream.aclose()
+                except Exception as e:
+                    logger.debug(f"Error closing stream: {e}")
+            # Delay to allow SUT to process stream closure
+            # Longer delay works around SUT bug where rapid sequential requests fail
+            await asyncio.sleep(1.0)
+
         # If we got events, they should indicate error
         if events:
             # Check if any event indicates an error
@@ -336,6 +358,15 @@ async def test_tasks_resubscribe(sut_client, agent_card_data):
             # Cancel tasks if they're still running
             initial_stream_task.cancel()
             resubscribe_task.cancel()
+
+            # Wait for cancellation to complete and streams to close
+            try:
+                await asyncio.gather(initial_stream_task, resubscribe_task, return_exceptions=True)
+            except asyncio.CancelledError:
+                pass
+
+            # Small delay to allow SUT to clean up server-side resources
+            await asyncio.sleep(0.2)
             
         # Check for errors from the background tasks
         if stream_error:
@@ -399,6 +430,7 @@ async def test_tasks_resubscribe_nonexistent(sut_client, agent_card_data):
     # Use a random, non-existent task ID
     task_id = NON_EXISTENT_TASK_ID_PREFIX + message_utils.generate_request_id()
 
+    resubscribe_stream = None
     try:
         # Use transport-agnostic task resubscription with non-existent task ID
         resubscribe_stream = transport_resubscribe_task(sut_client, task_id)
@@ -451,7 +483,7 @@ async def test_tasks_resubscribe_nonexistent(sut_client, agent_card_data):
 
             # Add timeout to prevent hanging on bad streams
             error_found = await asyncio.wait_for(process_stream(), timeout=TIMEOUTS["async_wait_for"])
-                    
+
         except asyncio.TimeoutError:
             logger.warning("Timeout while processing resubscribe stream for nonexistent task - this may be expected")
         except RuntimeError as e:
@@ -461,6 +493,17 @@ async def test_tasks_resubscribe_nonexistent(sut_client, agent_card_data):
                 error_found = True
             else:
                 raise
+        finally:
+            # Explicitly close generator to send RST_STREAM to server
+            # This is critical to prevent resource leaks when tests run in sequence
+            if resubscribe_stream is not None and hasattr(resubscribe_stream, 'aclose'):
+                try:
+                    await resubscribe_stream.aclose()
+                except Exception as e:
+                    logger.debug(f"Error closing resubscribe stream: {e}")
+            # Delay to allow SUT to process stream closure
+            # Longer delay works around SUT bug where rapid sequential requests fail
+            await asyncio.sleep(1.0)
 
         # Should have received an error or failed status for non-existent task
         if events and not error_found:
@@ -581,49 +624,59 @@ async def test_sse_event_format_compliance(sut_client, agent_card_data):
         }
     }
 
+    stream = None
     try:
         # Use transport-agnostic streaming message sending
         stream = transport_send_streaming_message(sut_client, message_params)
         events_processed = 0
 
-        async for event in stream:
-            events_processed += 1
-            logger.info(f"Processing event format validation #{events_processed}: {event}")
+        try:
+            async for event in stream:
+                events_processed += 1
+                logger.info(f"Processing event format validation #{events_processed}: {event}")
 
-            # Validate streaming event structure per A2A specification
-            assert isinstance(event, dict), "Streaming event should be a dictionary/object"
+                # Validate streaming event structure per A2A specification
+                assert isinstance(event, dict), "Streaming event should be a dictionary/object"
 
-            # For A2A streaming, events should be Task, Message, TaskStatusUpdateEvent, or TaskArtifactUpdateEvent objects
-            # Validate basic A2A object structure
-            if "kind" in event:
-                # This is likely a Message, TaskStatusUpdateEvent, or TaskArtifactUpdateEvent
-                valid_kinds = ["task", "message", "status-update", "artifact-update"]
-                assert event["kind"] in valid_kinds, (
-                    f"Event kind must be one of {valid_kinds}, got: {event.get('kind')}"
-                )
-                
-                if event["kind"] == "message":
-                    assert "role" in event, "Message events must have role field"
-                    assert "parts" in event, "Message events must have parts field"
-                elif event["kind"] == "status-update":
-                    assert "taskId" in event, "Status update events must have taskId field"
-                elif event["kind"] == "artifact-update":
-                    assert "taskId" in event, "Artifact update events must have taskId field"
-                    assert "artifact" in event, "Artifact update events must have artifact field"
-            elif "status" in event and "id" in event:
-                # This looks like a Task object
-                assert isinstance(event["status"], dict), "Task status must be an object"
-                assert "state" in event["status"], "Task status must have state field"
-            else:
-                # Unknown event type - log for debugging but don't fail
-                logger.warning(f"Unknown event structure: {event}")
+                # For A2A streaming, events should be Task, Message, TaskStatusUpdateEvent, or TaskArtifactUpdateEvent objects
+                # Validate basic A2A object structure
+                if "kind" in event:
+                    # This is likely a Message, TaskStatusUpdateEvent, or TaskArtifactUpdateEvent
+                    valid_kinds = ["task", "message", "status-update", "artifact-update"]
+                    assert event["kind"] in valid_kinds, (
+                        f"Event kind must be one of {valid_kinds}, got: {event.get('kind')}"
+                    )
 
-            # Process a few events then break
-            if events_processed >= 3:
-                break
+                    if event["kind"] == "message":
+                        assert "role" in event, "Message events must have role field"
+                        assert "parts" in event, "Message events must have parts field"
+                    elif event["kind"] == "status-update":
+                        assert "taskId" in event, "Status update events must have taskId field"
+                    elif event["kind"] == "artifact-update":
+                        assert "taskId" in event, "Artifact update events must have taskId field"
+                        assert "artifact" in event, "Artifact update events must have artifact field"
+                elif "status" in event and "id" in event:
+                    # This looks like a Task object
+                    assert isinstance(event["status"], dict), "Task status must be an object"
+                    assert "state" in event["status"], "Task status must have state field"
+                else:
+                    # Unknown event type - log for debugging but don't fail
+                    logger.warning(f"Unknown event structure: {event}")
 
-        assert events_processed > 0, "Streaming should produce at least one event"
-        
+                # Process a few events then break
+                if events_processed >= 3:
+                    break
+
+            assert events_processed > 0, "Streaming should produce at least one event"
+
+        finally:
+            # Explicitly close generator to send RST_STREAM to server
+            if stream is not None and hasattr(stream, 'aclose'):
+                try:
+                    await stream.aclose()
+                except Exception as e:
+                    logger.debug(f"Error closing stream: {e}")
+
     except Exception as e:
         error_msg = str(e).lower()
         if "501" in error_msg or "not implemented" in error_msg:
